@@ -1,14 +1,13 @@
 Category,Keywords,Color
 Food & Dining,"swiggy,zomato,restaurant,cafe,starbucks,mcdonald,dominos,pizza,food,dining,blinkit,dunzo,bigbasket,grocery,kirana,hotel food,eat,bakery,dhaba,chai,tiffin,mess,canteen,cafeteria,burger,sandwich,biryani,taste,kitchen,grill,bbq,subway,kfc,haldirams,amul,dairy,milk,bread, sweets,hungerbox,zepto,milkbasket,supermark,supermar",#378ADD
 Shopping,"amazon,flipkart,myntra,ajio,nykaa,meesho,snapdeal,reliance digital,dmart,big bazaar,mall,retail,market,shopping,croma,vijay sales,decathlon,ikea,pepperfry,urban ladder,firstcry,babycare,tatacliq,tata cliq,shoppers stop,pantaloons,westside,lifestyle,max fashion,zara,h&m,uniqlo",#1D9E75
-Transport,"uber,ola,rapido,metro,bus,fuel,petrol,diesel,namma yatri,cab,parking,toll,railway,irctc,flight,airline,indigo,spicejet,airindia,vistara,makemytrip air,goibibo air,cleartrip air,fastag,highway,transport,travel card,ola money",#D85A30
 Entertainment,"netflix,prime video,hotstar,disney,spotify,youtube premium,gaming,pvr,inox,bookmyshow,book my show,cinema,movie,concert,show ticket,apple music,gaana,jiosaavn,jio saavn,zee5,sonyliv,voot,ullu,mxplayer,mx player,playo",#7F77DD
 Utilities,"electricity,water bill,gas bill,internet,broadband,airtel,jio,bsnl,vodafone,vi pay,telephone,mobile recharge,dth,tata sky,dish tv,recharge,postpaid,prepaid,bill payment,bbps,bescom,tata power,adani electric,mahanagar gas,indane,hp gas,bharatgas,piped gas,nobroker",#BA7517
 Health,"apollo,practo,medplus,pharmacy,chemist,hospital,clinic,doctor,medicine,health,lab,diagnostic,test,wellness,fitness,gym,cult.fit,cult fit,1mg,pharmeasy,netmeds,healthkart,max hospital,fortis,manipal,columbia,lifespring,thyrocare,dr lal,UNITED INDIA INSURANCE COMPANY LIMITED",#E24B4A
-Travel,"hotel,resort,booking.com,makemytrip hotel,goibibo hotel,oyo,zostel,airbnb,treebo,fab hotel,travel,tour,trip,vacation,holiday,sightseeing,visa,passport,forex,foreign exchange,thomas cook,goibibo,ibibo",#0F6E56
-Salary/Income,"salary,stipend,payroll,paycheck,opening balance,income,wages,,credited by employer,appraisal,bonus,incentive,arrear,reimbursement,lta,hra allowance,unileverind,unilever,uipl,itdtax refund",#639922
+Travel,"hotel,resort,booking.com,makemytrip hotel,goibibo hotel,oyo,zostel,airbnb,treebo,fab hotel,travel,tour,trip,vacation,holiday,sightseeing,visa,passport,forex,foreign exchange,thomas cook,goibibo,ibibo,uber,ola,rapido,metro,bus,fuel,petrol,diesel,namma yatri,cab,parking,toll,railway,irctc,flight,airline,indigo,spicejet,airindia,vistara,makemytrip air,goibibo air,cleartrip air,fastag,highway,transport,travel card,ola money",#0F6E56
+Salary/Income,"salary,stipend,payroll,paycheck,opening balance,income,wages,,credited by employer,appraisal,bonus,incentive,arrear,reimbursement,lta,hra allowance,unileverind,unilever,uipl,itdtax refund,wipro,tcs,infosys",#639922
 EMI/Loan,"emi,loan,mortgage,repayment,bank emi,hdfc emi,icici emi,bajaj finance,hdfc credila,sbi loan,home loan,car loan,personal loan,education loan,emi debit",#D4537E
-Investment,"mutual fund,mf,sip,stocks,zerodha,groww,kite,smallcase,ppf,fd open,fixed deposit,insurance,lic,premium,nps,elss,equity,debt fund,gold bond,sovereign,demat,trading,upstox,angel,motilal,AUTOBPay/BSELimited",#185FA5
+Contra - Investment,"mutual fund,mf,sip,stocks,zerodha,groww,kite,smallcase,ppf,fd open,fixed deposit,insurance,lic,premium,nps,elss,equity,debt fund,gold bond,sovereign,demat,trading,upstox,angel,motilal,AUTOBPay/BSELimited",#185FA5
 Rent,"rent,house rent,pg rent,hostel rent,lease,landlord,property rent,accommodation rent,flat rent,room rent,archana",#9B59B6
 Education,"school fee,college fee,tuition,course,udemy,coursera,linkedin learning,byju,byjus,unacademy,vedantu,whitehat,skill,certification,exam fee,books,stationery",#E67E22
 Subscriptions,"apple,google one,microsoft,adobe,canva,notion,slack,zoom,dropbox,icloud,onedrive,annual subscription,monthly plan,membership,club membership",#16A085
@@ -17,8 +16,8 @@ Personal Care,"salon,spa,parlour,parlor,beauty,haircut,nails,waxing,threading,gr
 ATM & Cash,"atm,cash withdrawal,cash deposit,atm wtdr,atm cash, cash wdl, cash dep",#607D8B
 Charity,"donation,charity,ngo,temple,church,mosque,religious,daan,tithe,zakat",#795548
 Other,"miscellaneous,other,unknown",#B4B2A9
-Transfer Axis bank A/c,Piyush/UTIB,
-Transfer ICICI bank A/c,piyushwa/icici,
+Contra - Transfer Axis bank A/c,/UTIB,
+Contra - Transfer ICICI bank A/c,/icici,
 Credit card bill,"bobcredit,icicicredit, CC Billpay, CCBillpay, icici bank credit ca,hdfcbank.billd/Pa,ATD/Auto Debit CC,INFINITY PAYMENT RECEIVED,Autodebit Payment Recd.",
 Bank Interest,Int.Pd,
 Transfers,"neft,imps,upi,transfer,rtgs,send money,wallet,paytm,phonepe,gpay,google pay,bhim,razorpay,cashfree,settlement,refund,reversal,chargeback",#888780
