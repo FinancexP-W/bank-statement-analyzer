@@ -26,9 +26,43 @@ from openpyxl.chart.series import DataPoint
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 SCRIPT_DIR   = Path(__file__).parent
-KEYWORDS_CSV = SCRIPT_DIR / "category_keywords.csv"
-CONFIGS_FILE = SCRIPT_DIR / "statement_configs.json"
-SESSION_FILE = SCRIPT_DIR / "session.json"
+
+
+def assign_billing_month(date_obj, cycle_start_day):
+    """
+    Given a transaction date and the billing cycle start day, return the
+    month string (e.g. 'Apr 2024') for the billing period in which MORE
+    days fall.
+
+    Example:  cycle_start_day = 21
+      - Cycle: 21 Mar → 20 Apr  →  11 days in Mar, 20 days in Apr  →  'Apr 2024'
+      - Cycle: 21 Apr → 20 May  →  10 days in Apr, 20 days in May  →  'May 2024'
+
+    The billing month is always the MONTH THAT HAS THE MOST DAYS in the cycle,
+    which is always the month containing the 20th (cycle_start_day - 1).
+    So: if date.day >= cycle_start_day → belongs to NEXT month's billing cycle.
+        if date.day <  cycle_start_day → belongs to CURRENT month's billing cycle.
+    """
+    from datetime import date as date_cls
+    import calendar
+
+    d = date_obj if isinstance(date_obj, date_cls) else date_obj.date()
+
+    if d.day >= cycle_start_day:
+        # Transaction is in the first part of a cycle: billing month = next month
+        if d.month == 12:
+            bill_month, bill_year = 1, d.year + 1
+        else:
+            bill_month, bill_year = d.month + 1, d.year
+    else:
+        # Transaction is in the tail end of a cycle: billing month = current month
+        bill_month, bill_year = d.month, d.year
+
+    return datetime(bill_year, bill_month, 1).strftime("%b %Y")
+KEYWORDS_CSV  = SCRIPT_DIR / "category_keywords.csv"
+OVERRIDES_CSV = SCRIPT_DIR / "category_overrides.csv"
+CONFIGS_FILE  = SCRIPT_DIR / "statement_configs.json"
+SESSION_FILE  = SCRIPT_DIR / "session.json"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -118,14 +152,64 @@ def load_keywords(path=KEYWORDS_CSV):
     return mapping
 
 
-def categorize(description: str, keyword_map: dict) -> str:
-    d = str(description).lower()
+def load_overrides(path=OVERRIDES_CSV):
+    """
+    Load manual category overrides from CSV.
+    Format: Description (exact), Category
+    Returns dict of {description_lower: category}
+    Creates the file with instructions if it doesn't exist.
+    """
+    if not path.exists():
+        # Create template file so user can find and edit it
+        import csv
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Description", "Category"])
+            writer.writerow(["# HOW TO USE: Add rows below with the EXACT transaction", ""])
+            writer.writerow(["# description and the correct category name.", ""])
+            writer.writerow(["# Example:", ""])
+            writer.writerow(["HDFC CREDIT CARD BILL PAYMENT", "Contra: Credit Card Payment"])
+            writer.writerow(["UPI/TRANSFER/123456/SAVINGS", "Contra: Internal Transfer"])
+        return {}
+
+    df_ov = pd.read_csv(path, dtype=str).fillna("")
+    overrides = {}
+    for _, row in df_ov.iterrows():
+        desc = row.get("Description", "").strip()
+        cat  = row.get("Category",    "").strip()
+        # Skip blank rows and comment rows
+        if desc and cat and not desc.startswith("#"):
+            overrides[desc.lower()] = cat
+    return overrides
+
+
+def categorize(description: str, keyword_map: dict,
+               overrides: dict = None) -> str:
+    """
+    Categorise a transaction description.
+    Priority:  1. Exact override match (case-insensitive)
+               2. Keyword match
+               3. "Other"
+    """
+    d = str(description).lower().strip()
+
+    # 1. Exact override — highest priority
+    if overrides:
+        if d in overrides:
+            return overrides[d]
+        # Also try partial override match (description contains the override key)
+        for key, cat in overrides.items():
+            if key and key in d:
+                return cat
+
+    # 2. Keyword match
     for category, keywords in keyword_map.items():
         if category in ("Other", ""):
             continue
         for kw in keywords:
             if kw and kw in d:
                 return category
+
     return "Other"
 
 
@@ -307,7 +391,7 @@ def auto_detect_columns(df, cfg):
     }
 
 
-def parse_statement(filepath, cfg, keyword_map):
+def parse_statement(filepath, cfg, keyword_map, overrides=None):
     """Parse one CSV file according to cfg; return list of dicts."""
     path = Path(filepath)
     skip = int(cfg.get("skip_rows", 0))
@@ -387,33 +471,63 @@ def parse_statement(filepath, cfg, keyword_map):
 
     # ── Parse rows ────────────────────────────────────────────────────────────
     rows = []
-    unknown_dates = 0
+
+    skipped_no_date = 0
 
     for _, row in df.iterrows():
-        # Date
+        # ── Footer row detection (multiple checks) ────────────────────────────────
         raw_date = str(row[date_col]).strip() if date_col else ""
+        raw_desc = str(row[desc_col]).strip() if desc_col and desc_col in row else ""
+
+        # Keywords that indicate a footer/total/header row
+        FOOTER_KEYWORDS = ("nan", "", "total", "opening", "closing", "balance",
+                           "sub total", "subtotal", "grand total", "summary",
+                           "closing balance", "opening balance", "remarks", "notes",
+                           "running balance", "current balance")
+
+        # Check 1: Blank or footer-like date field
+        if not raw_date or raw_date.lower() in FOOTER_KEYWORDS:
+            skipped_no_date += 1
+            continue
+
+        # Check 2: Footer keywords in description field
+        if raw_desc.lower() in FOOTER_KEYWORDS or \
+           any(kw in raw_desc.lower() for kw in ("total", "balance", "subtotal", "grand total", "opening", "closing")):
+            skipped_no_date += 1
+            continue
+
+        # Check 3: Date parsing + validation
         date_obj = None
         date_str = raw_date
         month    = "Unknown"
 
-        if raw_date and raw_date.lower() not in ("nan", ""):
-            if detected_fmt:
-                raw_clean = raw_date.split(" ")[0].split("T")[0]
-                try:
-                    date_obj = datetime.strptime(raw_clean, detected_fmt)
-                except Exception:
-                    date_obj, _ = try_parse_date(raw_date)
-            else:
+        if detected_fmt:
+            raw_clean = raw_date.split(" ")[0].split("T")[0]
+            try:
+                date_obj = datetime.strptime(raw_clean, detected_fmt)
+            except Exception:
                 date_obj, _ = try_parse_date(raw_date)
+        else:
+            date_obj, _ = try_parse_date(raw_date)
 
-            if date_obj:
-                date_str = date_obj.strftime("%Y-%m-%d")
-                month    = date_obj.strftime("%b %Y")
-            else:
-                unknown_dates += 1
+        # If date still can't be parsed, skip — it's likely a footer/total row
+        if not date_obj:
+            skipped_no_date += 1
+            continue
 
-        # Description
-        desc = str(row[desc_col]).strip() if desc_col and desc_col in row else ""
+        date_str = date_obj.strftime("%Y-%m-%d")
+
+        # Month assignment — billing cycle mode or standard date mode
+        month_mode       = cfg.get("month_mode", "date")        # "date" or "billing_cycle"
+        cycle_start_day  = int(cfg.get("billing_cycle_day", 1))
+
+        if month_mode == "billing_cycle" and cycle_start_day > 1:
+            month = assign_billing_month(date_obj, cycle_start_day)
+        else:
+            month = date_obj.strftime("%b %Y")
+
+        # Description (already captured above)
+        desc = raw_desc
 
         # Amount
         debit = credit = 0.0
@@ -437,6 +551,7 @@ def parse_statement(filepath, cfg, keyword_map):
         amount   = debit if debit > 0 else credit
         is_debit = debit > 0
 
+        cat = categorize(desc, keyword_map, overrides)
         rows.append({
             "date"       : date_str,
             "date_obj"   : date_obj,
@@ -444,14 +559,15 @@ def parse_statement(filepath, cfg, keyword_map):
             "description": desc,
             "amount"     : round(amount, 2),
             "is_debit"   : is_debit,
-            "category"   : categorize(desc, keyword_map),
+            "category"   : cat,
+            "is_contra"  : cat.lower().startswith("contra"),
             "source"     : path.name,
             "source_name": cfg.get("name", path.stem),
             "type"       : cfg.get("type", "bank"),
         })
 
-    if unknown_dates:
-        print(f"  [WARN] {unknown_dates} rows had unrecognised dates → tagged 'Unknown'.")
+    if skipped_no_date:
+        print(f"  [INFO] Skipped {skipped_no_date} rows with no valid date (totals/summary rows).")
 
     return rows
 
@@ -512,12 +628,13 @@ def build_summary_sheet(wb, df):
     ws = wb.create_sheet("Summary", 0)
     ws.sheet_view.showGridLines = False
 
-    debits  = df[df.is_debit]
-    credits = df[~df.is_debit]
+    df_c    = df[~df.is_contra] if "is_contra" in df.columns else df
+    debits  = df_c[df_c.is_debit]
+    credits = df_c[~df_c.is_debit]
     total_spend  = debits.amount.sum()
     total_income = credits.amount.sum()
     net_savings  = total_income - total_spend
-    months = df.month.nunique()
+    months = df_c.month.nunique()
     avg_monthly_spend  = total_spend  / months if months else 0
     avg_monthly_income = total_income / months if months else 0
 
@@ -532,8 +649,11 @@ def build_summary_sheet(wb, df):
 
     ws.merge_cells("A2:I2")
     sub = ws["A2"]
+    n_contra = len(df) - len(df_c)
+    contra_note = f"   |   {n_contra} contra entries excluded" if n_contra else ""
     sub.value     = (f"Generated on {datetime.now():%d %B %Y}   |   "
-                     f"{len(df):,} transactions   |   {months} month(s) analysed")
+                     f"{len(df_c):,} transactions   |   {months} month(s) analysed"
+                     f"{contra_note}")
     sub.font      = _font(size=10, color="9CA3AF", italic=True)
     sub.fill      = _fill(CLR["subheader_bg"])
     sub.alignment = _align("center")
@@ -556,7 +676,7 @@ def build_summary_sheet(wb, df):
         ("Spend Transactions",   len(debits),         "7F1D1D",       "0"),
         ("Top Spend Category",   debits.groupby("category")["amount"].sum().idxmax()
                                  if not debits.empty else "—",        "991B1B", None),
-        ("Savings Rate",         (net_savings/total_income*100) if total_income else 0,
+        ("Savings Rate",         (net_savings/total_income) if total_income else 0,
                                                       "15803D",       "0.0%"),
     ]
 
@@ -784,12 +904,22 @@ def build_transactions_sheet(wb, df):
     ws = wb.create_sheet("All Transactions")
     ws.sheet_view.showGridLines = False
 
+    # ── Instructions banner ────────────────────────────────────────────────────
+    ws.merge_cells("A1:G1")
+    tip = ws["A1"]
+    tip.value = ("💡  Wrong category? Add the description + correct category to "
+                 "category_overrides.csv — it will be applied on next run across all sheets.")
+    tip.font      = _font(size=9, color="92400E", italic=True)
+    tip.fill      = _fill("FEF3C7")
+    tip.alignment = _align("left")
+    ws.row_dimensions[1].height = 16
+
     cols = ["Date", "Description", "Category", "Type", "Amount (₹)",
             "Source", "Month"]
-    header_row(ws, 1, cols)
+    header_row(ws, 2, cols)
 
     for ri, (_, row) in enumerate(df.sort_values("date", ascending=False)
-                                    .iterrows(), 2):
+                                    .iterrows(), 3):
         bg = "FFFFFF" if ri % 2 == 0 else CLR["alt_row"]
         data_cell(ws, ri, 1, row.date, bg=bg)
         data_cell(ws, ri, 2, row.description, bg=bg)
@@ -807,12 +937,18 @@ def build_transactions_sheet(wb, df):
         data_cell(ws, ri, 6, row.source_name, bg=bg)
         data_cell(ws, ri, 7, row.month, bg=bg)
 
+        # Contra entries — tint row purple and italicise to mark as excluded
+        is_contra = getattr(row, "is_contra", False)
+        if is_contra:
+            for ci_ in range(1, 8):
+                c_ = ws.cell(row=ri, column=ci_)
+                c_.fill = _fill("EDE9FE")
+                c_.font = _font(size=10, color="7C3AED", italic=True)
+
     set_col_widths(ws, {"A": 14, "B": 48, "C": 22, "D": 10,
                         "E": 16, "F": 22, "G": 14})
-    ws.freeze_panes = "A2"
-
-    # Auto-filter
-    ws.auto_filter.ref = f"A1:G1"
+    ws.freeze_panes = "A3"
+    ws.auto_filter.ref = f"A2:G2"
     return ws
 
 
@@ -820,7 +956,8 @@ def build_top10_sheet(wb, df):
     ws = wb.create_sheet("Top 10 Spends")
     ws.sheet_view.showGridLines = False
 
-    debits = df[df.is_debit].nlargest(10, "amount").reset_index(drop=True)
+    df_c   = df[~df.is_contra] if "is_contra" in df.columns else df
+    debits = df_c[df_c.is_debit].nlargest(10, "amount").reset_index(drop=True)
 
     ws.merge_cells("A1:F1")
     t = ws["A1"]
@@ -1028,16 +1165,17 @@ def build_dashboard_sheet(wb, df):
         try: return __import__("datetime").datetime.strptime(m, "%b %Y")
         except: return __import__("datetime").datetime.min
 
-    debits        = df[df.is_debit]
-    credits       = df[~df.is_debit]
-    months_sorted = sorted(df.month.unique(), key=month_sort)
+    df_c          = df[~df.is_contra] if "is_contra" in df.columns else df
+    debits        = df_c[df_c.is_debit]
+    credits       = df_c[~df_c.is_debit]
+    months_sorted = sorted(df_c.month.unique(), key=month_sort)
     n_months      = max(len(months_sorted), 1)
     total_spend   = debits.amount.sum()
     total_income  = credits.amount.sum()
     net_savings   = total_income - total_spend
     avg_spend     = total_spend / n_months
     avg_income    = total_income / n_months
-    sav_rate      = (net_savings / total_income * 100) if total_income else 0
+    sav_rate      = (net_savings / total_income * 100) if total_income > 0 else 0
 
     cat_totals = (debits.groupby("category")["amount"].sum()
                   .sort_values(ascending=False))
@@ -1351,6 +1489,176 @@ def build_dashboard_sheet(wb, df):
     return ws
 
 
+def build_contra_sheet(wb, df):
+    """Separate sheet for Contra entries — transfers, CC bill payments, inter-account moves."""
+    ws = wb.create_sheet("Contra Entries")
+    ws.sheet_view.showGridLines = False
+
+    contra = df[df.is_contra].copy() if "is_contra" in df.columns else df.iloc[0:0].copy()
+    contra = contra.sort_values("date_obj", ascending=False).reset_index(drop=True)
+
+    # ── Title ──────────────────────────────────────────────────────────────────
+    ws.merge_cells("A1:H1")
+    t = ws["A1"]
+    t.value     = "Contra Entries  —  Transfers, CC Payments & Internal Moves"
+    t.font      = _font(bold=True, size=14, color=CLR["header_fg"])
+    t.fill      = _fill("4C1D95")
+    t.alignment = _align("center")
+    ws.row_dimensions[1].height = 28
+
+    ws.merge_cells("A2:H2")
+    s = ws["A2"]
+    s.value = ("These entries are EXCLUDED from all income/expense totals. "
+               "They represent internal money movements — not real spending or income.")
+    s.font      = _font(size=10, color="5B21B6", italic=True)
+    s.fill      = _fill("EDE9FE")
+    s.alignment = _align("center")
+    ws.row_dimensions[2].height = 18
+
+    if contra.empty:
+        ws.merge_cells("A4:H4")
+        nc = ws["A4"]
+        nc.value     = ("No contra entries found. "
+                        "To use this feature, name a category starting with 'Contra' "
+                        "in category_keywords.csv — e.g. 'Contra Credit Card Payment' "
+                        "or 'Contra Internal Transfer'.")
+        nc.font      = _font(size=11, color="166534")
+        nc.fill      = _fill("DCFCE7")
+        nc.alignment = _align("center")
+        set_col_widths(ws, {"A": 14, "B": 48, "C": 26, "D": 16,
+                            "E": 16, "F": 14, "G": 22, "H": 12})
+        return ws
+
+    # ── KPI cards ──────────────────────────────────────────────────────────────
+    c_debits  = contra[contra.is_debit]
+    c_credits = contra[~contra.is_debit]
+    total_out = c_debits.amount.sum()
+    total_in  = c_credits.amount.sum()
+    net_diff  = total_in - total_out
+
+    ws.row_dimensions[3].height = 8
+    ws.row_dimensions[4].height = 16
+    ws.row_dimensions[5].height = 26
+
+    kpis = [
+        ("Total Outflows",  total_out,  CLR["debit"],   "₹#,##0"),
+        ("Total Inflows",   total_in,   CLR["credit"],  "₹#,##0"),
+        ("Net Difference",  abs(net_diff),
+         CLR["credit"] if net_diff >= 0 else CLR["debit"], "₹#,##0"),
+        ("Entries",         len(contra), "374151",       "0"),
+    ]
+    for ki, (lbl, val, color, fmt) in enumerate(kpis, 1):
+        lc = ws.cell(row=4, column=ki, value=lbl)
+        lc.font      = _font(size=9, color="6B7280")
+        lc.fill      = _fill("F5F3FF")
+        lc.alignment = _align("center")
+        vc = ws.cell(row=5, column=ki, value=val)
+        vc.font          = _font(bold=True, size=13, color=color)
+        vc.fill          = _fill("F5F3FF")
+        vc.alignment     = _align("center")
+        vc.number_format = fmt
+        vc.border        = _border("bottom", color)
+
+    # Balance note
+    balance_note = ws.cell(row=5, column=5,
+                           value=("✅  Balanced — outflows match inflows" if abs(net_diff) < 1
+                                  else f"⚠  Imbalance of ₹{abs(net_diff):,.0f} — "
+                                       "some counterpart entries may be missing"))
+    balance_note.font      = _font(size=9,
+                                   color="166534" if abs(net_diff) < 1 else "92400E",
+                                   italic=True)
+    balance_note.fill      = _fill("DCFCE7" if abs(net_diff) < 1 else "FEF3C7")
+    balance_note.alignment = _align("left")
+    ws.merge_cells(start_row=5, start_column=5, end_row=5, end_column=8)
+
+    ws.row_dimensions[6].height = 8
+
+    # ── Category summary table ──────────────────────────────────────────────────
+    header_row(ws, 7, ["Category", "Entries", "Outflows (₹)", "Inflows (₹)", "Net (₹)"])
+    ws.row_dimensions[7].height = 18
+
+    cat_out = (c_debits.groupby("category")["amount"]
+               .agg(["sum","count"]).rename(columns={"sum":"out","count":"out_n"}))
+    cat_in  = (c_credits.groupby("category")["amount"]
+               .agg(["sum","count"]).rename(columns={"sum":"in_","count":"in_n"}))
+    cat_summary = cat_out.join(cat_in, how="outer").fillna(0)
+    cat_summary["net"]     = cat_summary["in_"] - cat_summary["out"]
+    cat_summary["entries"] = (cat_summary.get("out_n", 0)
+                              + cat_summary.get("in_n", 0)).astype(int)
+
+    for ri, (cat, row) in enumerate(cat_summary.iterrows(), 8):
+        bg    = "FFFFFF" if ri % 2 == 0 else "F5F3FF"
+        hex_c = CAT_COLORS.get(cat, "7C3AED")
+        data_cell(ws, ri, 1, cat,  bold=True, color=hex_c, bg=bg)
+        data_cell(ws, ri, 2, int(row.entries), align="center", bg=bg)
+        data_cell(ws, ri, 3, row.out if row.out else None,
+                  fmt="₹#,##0", align="right", color=CLR["debit"],  bg=bg)
+        data_cell(ws, ri, 4, row.in_ if row.in_ else None,
+                  fmt="₹#,##0", align="right", color=CLR["credit"], bg=bg)
+        net_c = CLR["credit"] if row.net >= 0 else CLR["debit"]
+        data_cell(ws, ri, 5, row.net if row.net else None,
+                  fmt="₹#,##0", align="right", color=net_c, bold=True, bg=bg)
+
+    summary_last = 7 + len(cat_summary) + 1
+    ws.row_dimensions[summary_last].height = 10
+
+    # ── Full transaction list ──────────────────────────────────────────────────
+    list_start = summary_last + 1
+    ws.merge_cells(f"A{list_start}:H{list_start}")
+    sh = ws[f"A{list_start}"]
+    sh.value     = "All Contra Transactions"
+    sh.font      = _font(bold=True, size=12, color=CLR["header_fg"])
+    sh.fill      = _fill("4C1D95")
+    sh.alignment = _align("center")
+    ws.row_dimensions[list_start].height = 20
+
+    hdr_r = list_start + 1
+    header_row(ws, hdr_r, ["Date", "Description", "Category",
+                            "Outflow (₹)", "Inflow (₹)", "Month", "Source", "Direction"])
+    ws.row_dimensions[hdr_r].height = 18
+
+    for ri, row in contra.iterrows():
+        rn   = hdr_r + 1 + ri
+        bg   = "FFFFFF" if rn % 2 == 0 else "F5F3FF"
+        hex_c = CAT_COLORS.get(row.category, "7C3AED")
+
+        data_cell(ws, rn, 1, row.date, bg=bg)
+        data_cell(ws, rn, 2, row.description, bg=bg)
+
+        cc = ws.cell(row=rn, column=3, value=row.category)
+        cc.font      = _font(size=10, color=hex_c, bold=True)
+        cc.fill      = _fill(bg)
+        cc.border    = _border("bottom", CLR["border"])
+        cc.alignment = _align()
+
+        if row.is_debit:
+            data_cell(ws, rn, 4, row.amount, fmt="₹#,##0",
+                      align="right", color=CLR["debit"],  bg=bg)
+            data_cell(ws, rn, 5, None, bg=bg)
+        else:
+            data_cell(ws, rn, 4, None, bg=bg)
+            data_cell(ws, rn, 5, row.amount, fmt="₹#,##0",
+                      align="right", color=CLR["credit"], bg=bg)
+
+        data_cell(ws, rn, 6, row.month,       bg=bg)
+        data_cell(ws, rn, 7, row.source_name, bg=bg)
+
+        dir_c = ws.cell(row=rn, column=8,
+                        value="OUT ↑" if row.is_debit else "IN ↓")
+        dir_c.font      = _font(bold=True, size=9,
+                                color=CLR["debit"] if row.is_debit else CLR["credit"])
+        dir_c.fill      = _fill(bg)
+        dir_c.border    = _border("bottom", CLR["border"])
+        dir_c.alignment = _align("center")
+
+    ws.auto_filter.ref = (f"A{hdr_r}:"
+                          f"{get_column_letter(8)}{hdr_r + len(contra)}")
+    set_col_widths(ws, {"A": 14, "B": 48, "C": 26, "D": 16,
+                        "E": 16, "F": 14, "G": 22, "H": 12})
+    ws.freeze_panes = f"A{hdr_r + 1}"
+    return ws
+
+
 def build_excel(df, output_path):
     wb = Workbook()
     wb.remove(wb.active)
@@ -1360,6 +1668,7 @@ def build_excel(df, output_path):
     build_transactions_sheet(wb, df)
     build_top10_sheet(wb, df)
     build_extraordinary_sheet(wb, df)
+    build_contra_sheet(wb, df)
     build_dashboard_sheet(wb, df)
 
     wb.save(output_path)
@@ -1407,6 +1716,48 @@ def configure_source_interactively(configs):
         cfg["credit_col"] = prompt("Credit/Deposit column",  cfg.get("credit_col", ""))
 
     configs[name] = cfg
+
+    # ── Billing cycle (credit cards only) ────────────────────────────────────
+    if cfg.get("type") == "credit":
+        print()
+        print("  ── Billing Cycle Settings ──────────────────────────────────")
+        print("  Credit card statements can be grouped two ways:")
+        print("    1 = By transaction date  (e.g. a Mar 25 txn → March)")
+        print("    2 = By billing cycle     (e.g. cycle 21 Mar–20 Apr → April,")
+        print("        because most of the cycle falls in April)")
+        mode = prompt("  Choose grouping mode", "1")
+
+        if mode == "2":
+            cfg["month_mode"] = "billing_cycle"
+            print()
+            print("  Enter the day your billing cycle STARTS each month.")
+            print("  Example: if your bill covers 21st Mar to 20th Apr, enter 21")
+            while True:
+                try:
+                    day_str = prompt("  Billing cycle start day (1-28)", "21")
+                    day = int(day_str)
+                    if 1 <= day <= 28:
+                        cfg["billing_cycle_day"] = day
+                        break
+                    print("  Please enter a number between 1 and 28.")
+                except ValueError:
+                    print("  Please enter a valid number.")
+
+            # Confirm back to user
+            from datetime import date
+            import calendar
+            example_date = date(2024, 3, 25)   # a date in the first part of a cycle
+            example_month = assign_billing_month(example_date, day)
+            print(f"\n  ✓  Confirmed: a transaction on 25 Mar with cycle starting on {day}th")
+            print(f"     will be grouped under → {example_month}")
+        else:
+            cfg["month_mode"] = "date"
+            cfg.pop("billing_cycle_day", None)
+    else:
+        cfg["month_mode"] = "date"
+        cfg.pop("billing_cycle_day", None)
+
+    configs[name] = cfg
     return name, cfg
 
 
@@ -1419,8 +1770,12 @@ def interactive_mode():
     print(f"  Session file    : {SESSION_FILE}")
 
     keyword_map = load_keywords()
+    overrides   = load_overrides()
     configs     = load_configs()
     session     = load_session()
+
+    print(f"  Overrides file  : {OVERRIDES_CSV}"
+          + (f"  ({len(overrides)} active override(s))" if overrides else "  (none set yet)"))
 
     # ── Restore previously saved files ───────────────────────────────────────
     file_cfgs     = []   # list of (Path, cfg_dict)
@@ -1442,7 +1797,11 @@ def interactive_mode():
         for i, e in enumerate(session["files"], 1):
             p = Path(e["path"])
             status = "\u2713" if p.exists() else "\u2717 NOT FOUND"
-            print(f"    {i:>2}.  {status}  {p.name:<38} [{e['cfg'].get('name','')}]")
+            cycle_tag = ""
+            ecfg = e["cfg"]
+            if ecfg.get("month_mode") == "billing_cycle":
+                cycle_tag = f"  [cycle:{ecfg.get('billing_cycle_day','?')}]"
+            print(f"    {i:>2}.  {status}  {p.name:<38} [{ecfg.get('name','')}]{cycle_tag}")
         print(f"  {'─'*56}")
 
         if missing:
@@ -1585,21 +1944,32 @@ def interactive_mode():
     print("\n\u23f3  Parsing files \u2026")
     all_txns = []
     for filepath, cfg in file_cfgs:
-        rows = parse_statement(filepath, cfg, keyword_map)
+        rows = parse_statement(filepath, cfg, keyword_map, overrides)
         all_txns.extend(rows)
-        print(f"  \u2713 {Path(filepath).name:<45} -> {len(rows):>4} transactions")
+        n_ov = sum(1 for r in rows
+                   if overrides and any(k in r['description'].lower()
+                                        for k in overrides))
+        ov_tag = f"  [{n_ov} overridden]" if n_ov else ""
+        print(f"  \u2713 {Path(filepath).name:<45} -> {len(rows):>4} transactions{ov_tag}")
 
     if not all_txns:
         print("\n[ERROR] No transactions parsed. Check column names and date format.")
         return
 
     df = pd.DataFrame(all_txns)
-    debits  = df[df.is_debit]
-    credits = df[~df.is_debit]
+    # Always re-derive is_contra from category name — ensures consistency
+    # even if some rows came from old session formats without the field
+    df["is_contra"] = df["category"].str.lower().str.startswith("contra")
 
-    # Quick preview
-    print(f"\n{'\u2500'*56}")
-    print(f"  Total transactions : {len(df):,}")
+    df_clean = df[~df.is_contra]
+    debits   = df_clean[df_clean.is_debit]
+    credits  = df_clean[~df_clean.is_debit]
+
+    # Quick preview (contra-excluded figures)
+    n_contra = int(df.is_contra.sum())
+    print(f"\n{'─'*56}")
+    print(f"  Total transactions : {len(df_clean):,}"
+          + (f"  (+{n_contra} contra excluded)" if n_contra else ""))
     print(f"  Total spend        : Rs.{debits.amount.sum():,.0f}")
     print(f"  Total income       : Rs.{credits.amount.sum():,.0f}")
     print(f"  Net savings        : Rs.{credits.amount.sum()-debits.amount.sum():,.0f}")
@@ -1642,14 +2012,16 @@ def main():
         with open(args.config) as f:
             run_cfg = json.load(f)
         keyword_map = load_keywords()
+        overrides   = load_overrides()
         configs     = load_configs()
         all_txns    = []
         for entry in run_cfg.get("files", []):
             cfg = dict(configs.get(entry["source"], configs["Custom"]))
             cfg["name"] = entry["source"]
-            rows = parse_statement(entry["file"], cfg, keyword_map)
+            rows = parse_statement(entry["file"], cfg, keyword_map, overrides)
             all_txns.extend(rows)
         df = pd.DataFrame(all_txns)
+        df["is_contra"] = df["category"].str.lower().str.startswith("contra")
         out = run_cfg.get("output", f"bank_dashboard_{datetime.now():%Y%m%d}.xlsx")
         build_excel(df, Path(out))
     else:
